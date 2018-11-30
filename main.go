@@ -1,80 +1,100 @@
 package main
 
 import (
-	"context"
-	"database/sql"
+	"encoding/csv"
+	"flag"
 	"fmt"
 	"log"
 	"os"
-	"time"
+	"sync"
 
-	oci8 "github.com/mattn/go-oci8"
+	"github.com/andreanidouglas/selectron/database/oracle"
+	"github.com/andreanidouglas/selectron/execution"
 )
 
-func main() {
-	if len(os.Args) < 2 {
-		log.Fatalf("Usage ./%s <filename>", os.Args[0])
-	}
-	var execs []Execution
+type fileLog struct {
+	f  *os.File
+	RW sync.RWMutex
+}
 
-	execs, err := New(os.Args[1])
+func main() {
+	var export bool
+	var outputLog string
+	var inputFile string
+	flag.BoolVar(&export, "export", false, "exports the template file")
+	flag.StringVar(&outputLog, "log", "", "select where to export log")
+	flag.StringVar(&inputFile, "execute", "export.csv", "define file to execute")
+	flag.Parse()
+
+	if export {
+		f, err := os.Create("export.csv")
+		if err != nil {
+			log.Fatalf("could not create export: %v", err)
+		}
+		w := csv.NewWriter(f)
+
+		header := []string{"database type", "host", "report name", "login", "password", "sql path"}
+		err = w.Write(header)
+		if err != nil {
+			log.Fatalf("could not write export: %v", err)
+		}
+		w.Flush()
+		f.Close()
+
+		os.Exit(0)
+	}
+
+	f := new(fileLog)
+
+	f.f = os.Stderr
+	if outputLog != "" {
+		var err error
+		f.f, err = os.Create(outputLog)
+		if err != nil {
+			log.Fatalf("could not create error: %v", err)
+		}
+	}
+
+	var wg sync.WaitGroup
+
+	var execs []execution.Execution
+
+	execs, err := execution.New(inputFile)
+
 	if err != nil {
 		log.Fatalf("could not start execution: %v", err)
 	}
 
+	wg.Add(len(execs))
 	for _, exec := range execs {
-		go func(exec Execution) {
+		go func(ex execution.Execution) {
+			f.RW.Lock()
+			fmt.Fprintf(f.f, "\nStarting: %s", ex.Name)
+			f.RW.Unlock()
+			db, err := oracle.New(ex)
+			if err != nil {
+				log.Fatalf("could not create new db connection: %v", err)
+			}
+			rows, err := db.SQLCommandExec()
+			if err != nil {
+				log.Fatalf("could not execute sql command: %v", err)
+			}
+			err = ex.WriteResult(rows)
+			if err != nil {
+				log.Fatalf("could not write result to file: %v", err)
+			}
 
+			db.Close()
+			f.RW.Lock()
+			fmt.Fprintf(f.f, "\nCompleted : %s", ex.Name)
+			f.RW.Unlock()
+			wg.Done()
 		}(exec)
 	}
 
-}
+	wg.Wait()
 
-func buildConnectionString(e Execution) string {
-	return fmt.Sprintf("%s/%s@%s", e.Login, e.Password)
-}
-
-func database() {
-
-	oci8.OCI8Driver.Logger = log.New(os.Stderr, "oci8 ", log.Ldate|log.Ltime|log.LUTC|log.Llongfile)
-
-	connString := "andredr/D5022a38@p601.noa.alcoa.com"
-
-	db, err := sql.Open("oci8", connString)
-	if err != nil {
-		log.Fatalf("could not open database: %v", err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 55*time.Second)
-	defer cancel()
-
-	rows, err := db.QueryContext(ctx, "select 1 from dual")
-	if err != nil {
-		log.Fatalf("could not query context: %v", err)
-	}
-
-	if !rows.Next() {
-		log.Fatalf("no Next rows")
-
-	}
-
-	dest := make([]interface{}, 1)
-	destPointer := make([]interface{}, 1)
-
-	destPointer[0] = &dest[0]
-	err = rows.Scan(destPointer...)
-
-	if err != nil {
-		log.Fatalf("could not read results: %v", err)
-	}
-
-	data, ok := dest[0].(float64)
-
-	if !ok {
-		log.Fatalf("could not smash results")
-	}
-	fmt.Println(data)
-
-	cancel()
-
+	f.RW.Lock()
+	fmt.Fprint(f.f, "\nAll Tasks Completed")
+	f.RW.Unlock()
 }
