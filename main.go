@@ -22,7 +22,7 @@ func main() {
 	var outputLog string
 	var inputFile string
 	flag.BoolVar(&export, "export", false, "exports the template file")
-	flag.StringVar(&outputLog, "log", "", "select where to export log")
+	flag.StringVar(&outputLog, "log", "", "select where to export log (default \"os.Stderr\")")
 	flag.StringVar(&inputFile, "execute", "export.csv", "define file to execute")
 	flag.Parse()
 
